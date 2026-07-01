@@ -7,12 +7,15 @@
 import os
 import json
 import re
-import datetime as dt
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from xml.etree import ElementTree as ET
 
 import requests
 from flask import Flask, request, jsonify, Response
+
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("molit")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 API_URL = "https://apis.data.go.kr/1613000/RTMSDataSvcAptTradeDev/getRTMSDataSvcAptTradeDev"
@@ -40,12 +43,10 @@ def _txt(item, *names):
 def parse_items(xml_text):
     rows = []
     root = ET.fromstring(xml_text)
-    # 에러 메시지 확인
     header = root.find(".//header")
     if header is not None:
         code = _txt(header, "resultCode")
         msg = _txt(header, "resultMsg")
-        # 00 / 000 = 정상
         if code and code not in ("00", "000"):
             raise RuntimeError(f"API 오류 {code}: {msg}")
     for item in root.iter("item"):
@@ -101,9 +102,35 @@ def norm(s):
     return re.sub(r"\s+", "", s or "").lower()
 
 
+def gather_rows(codes, months):
+    """여러 (지역코드, 년월) 조합을 병렬 조회해 전체 행과 오류 목록 반환."""
+    tasks = [(c, ym) for c in codes for ym in months]
+    all_rows, errors = [], []
+
+    def work(t):
+        code, ym = t
+        try:
+            return fetch_one(code, ym)
+        except Exception as e:  # noqa
+            msg = f"{code}/{ym}: {e}"
+            log.warning("조회 오류 %s", msg)
+            errors.append(msg)
+            return []
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+        for rows in ex.map(work, tasks):
+            all_rows.extend(rows)
+    return all_rows, errors, len(tasks)
+
+
+def resolve_codes(sido, sigungu):
+    if sigungu:
+        return list(REGIONS[sido][sigungu])
+    return [c for cs in REGIONS[sido].values() for c in cs]
+
+
 @app.route("/api/regions")
 def api_regions():
-    # 시/도 → 시군구 이름 목록 (코드는 서버에서만 사용)
     out = {sido: list(gus.keys()) for sido, gus in REGIONS.items()}
     return jsonify(out)
 
@@ -120,7 +147,7 @@ def api_search():
     data = request.get_json(force=True, silent=True) or {}
     complex_q = (data.get("complex") or "").strip()
     sido = (data.get("sido") or "").strip()
-    sigungu = (data.get("sigungu") or "").strip()  # "" 이면 시/도 전체
+    sigungu = (data.get("sigungu") or "").strip()
     start_ym = re.sub(r"\D", "", data.get("start_ym") or "")
     end_ym = re.sub(r"\D", "", data.get("end_ym") or "")
 
@@ -130,54 +157,64 @@ def api_search():
         return jsonify({"error": "시/도를 선택하세요."}), 400
     if len(start_ym) != 6 or len(end_ym) != 6:
         return jsonify({"error": "기간(년월)을 올바르게 지정하세요."}), 400
+    if sigungu and sigungu not in REGIONS[sido]:
+        return jsonify({"error": "시/군/구 값이 올바르지 않습니다."}), 400
 
-    # 조회 대상 코드 목록
-    if sigungu:
-        if sigungu not in REGIONS[sido]:
-            return jsonify({"error": "시/군/구 값이 올바르지 않습니다."}), 400
-        codes = list(REGIONS[sido][sigungu])
-    else:
-        codes = [c for cs in REGIONS[sido].values() for c in cs]
-
+    codes = resolve_codes(sido, sigungu)
     months = month_range(start_ym, end_ym)
     if not months:
         return jsonify({"error": "기간 순서를 확인하세요 (시작이 종료보다 이후)."}), 400
-
-    tasks = [(c, ym) for c in codes for ym in months]
-    if len(tasks) > MAX_REQUESTS:
+    if len(codes) * len(months) > MAX_REQUESTS:
         return jsonify({
-            "error": f"조회 범위가 너무 큽니다({len(tasks)}건). "
+            "error": f"조회 범위가 너무 큽니다({len(codes) * len(months)}건). "
                      f"시/군/구를 지정하거나 기간을 줄여주세요. (상한 {MAX_REQUESTS}건)"
         }), 400
 
+    all_rows, errors, nreq = gather_rows(codes, months)
     q = norm(complex_q)
-    results = []
-    errors = []
-
-    def work(t):
-        code, ym = t
-        try:
-            return fetch_one(code, ym)
-        except Exception as e:  # noqa
-            errors.append(f"{code}/{ym}: {e}")
-            return []
-
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        for rows in ex.map(work, tasks):
-            for row in rows:
-                if q in norm(row["aptNm"]):
-                    results.append(row)
-
-    # 정렬: 최신 거래일 순
+    results = [r for r in all_rows if q in norm(r["aptNm"])]
     results.sort(key=lambda x: x["dealDate"], reverse=True)
 
     return jsonify({
         "count": len(results),
         "rows": results,
         "queried": {"sido": sido, "sigungu": sigungu or "(전체)",
-                     "codes": len(codes), "months": len(months), "requests": len(tasks)},
+                     "codes": len(codes), "months": len(months),
+                     "requests": nreq, "fetched": len(all_rows)},
         "errors": errors[:5],
     })
+
+
+@app.route("/api/complexes", methods=["POST"])
+def api_complexes():
+    """자동완성용: 해당 지역·기간의 고유 단지명 목록."""
+    if not SERVICE_KEY:
+        return jsonify({"error": "서버에 국토부 API 키(MOLIT_API_KEY)가 설정되지 않았습니다."}), 500
+    data = request.get_json(force=True, silent=True) or {}
+    sido = (data.get("sido") or "").strip()
+    sigungu = (data.get("sigungu") or "").strip()
+    start_ym = re.sub(r"\D", "", data.get("start_ym") or "")
+    end_ym = re.sub(r"\D", "", data.get("end_ym") or "")
+
+    if sido not in REGIONS:
+        return jsonify({"error": "시/도를 선택하세요."}), 400
+    if not sigungu:
+        return jsonify({"error": "자동완성은 시/군/구를 선택해야 빠르게 불러올 수 있어요."}), 400
+    if sigungu not in REGIONS[sido]:
+        return jsonify({"error": "시/군/구 값이 올바르지 않습니다."}), 400
+    if len(start_ym) != 6 or len(end_ym) != 6:
+        return jsonify({"error": "기간(년월)을 지정하세요."}), 400
+
+    months = month_range(start_ym, end_ym)
+    if not months:
+        return jsonify({"error": "기간 순서를 확인하세요."}), 400
+    codes = resolve_codes(sido, sigungu)
+    if len(codes) * len(months) > MAX_REQUESTS:
+        return jsonify({"error": "기간이 너무 깁니다. 줄여주세요."}), 400
+
+    all_rows, errors, _ = gather_rows(codes, months)
+    names = sorted({r["aptNm"] for r in all_rows if r["aptNm"]})
+    return jsonify({"names": names, "count": len(names), "errors": errors[:5]})
 
 
 @app.route("/")
