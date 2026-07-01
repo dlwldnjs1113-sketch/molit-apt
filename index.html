@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>국토부 실거래가 조회 · 엑셀 다운로드</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  :root{--bg:#0f172a;--card:#fff;--line:#e2e8f0;--pri:#2563eb;--pri2:#1d4ed8;--muted:#64748b;--head:#f1f5f9;}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:'Segoe UI','Malgun Gothic',sans-serif;background:#f8fafc;color:#0f172a;}
+  header{background:linear-gradient(135deg,#1e3a8a,#2563eb);color:#fff;padding:22px 20px;}
+  header h1{margin:0;font-size:20px;font-weight:700;}
+  header p{margin:6px 0 0;font-size:13px;opacity:.85;}
+  .wrap{max-width:1080px;margin:0 auto;padding:20px;}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;box-shadow:0 1px 3px rgba(0,0,0,.04);}
+  .grid{display:grid;grid-template-columns:1.4fr 1fr 1fr .9fr .9fr auto;gap:10px;align-items:end;}
+  @media(max-width:840px){.grid{grid-template-columns:1fr 1fr;}}
+  label{display:block;font-size:12px;font-weight:600;color:var(--muted);margin-bottom:5px;}
+  input,select{width:100%;padding:10px 11px;border:1px solid var(--line);border-radius:9px;font-size:14px;background:#fff;}
+  input:focus,select:focus{outline:none;border-color:var(--pri);}
+  button{background:var(--pri);color:#fff;border:none;padding:11px 18px;border-radius:9px;font-size:14px;font-weight:700;cursor:pointer;white-space:nowrap;}
+  button:hover{background:var(--pri2);}
+  button:disabled{background:#94a3b8;cursor:not-allowed;}
+  .bar{display:flex;justify-content:space-between;align-items:center;margin:18px 2px 10px;gap:10px;flex-wrap:wrap;}
+  .status{font-size:14px;color:var(--muted);}
+  .btn-excel{background:#059669;} .btn-excel:hover{background:#047857;}
+  table{width:100%;border-collapse:collapse;font-size:13px;}
+  th,td{padding:9px 10px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;}
+  th{background:var(--head);position:sticky;top:0;font-size:12px;color:#334155;}
+  td.l,th.l{text-align:left;}
+  .tblwrap{max-height:60vh;overflow:auto;border:1px solid var(--line);border-radius:12px;}
+  .empty{padding:40px;text-align:center;color:var(--muted);}
+  .hint{font-size:12px;color:var(--muted);margin-top:10px;}
+  .cancel{color:#dc2626;font-weight:600;}
+  .spin{display:inline-block;width:15px;height:15px;border:2px solid #cbd5e1;border-top-color:var(--pri);border-radius:50%;animation:s .8s linear infinite;vertical-align:-3px;margin-right:6px;}
+  @keyframes s{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<header>
+  <h1>🏢 국토부 아파트 실거래가 조회</h1>
+  <p>단지명과 지역·기간을 입력하면 국토교통부 실거래가를 모아 엑셀로 내려받을 수 있어요.</p>
+</header>
+<div class="wrap">
+  <div class="card">
+    <div class="grid">
+      <div>
+        <label>단지명</label>
+        <input id="complex" placeholder="예: 래미안, 자이, 헬리오시티" autocomplete="off">
+      </div>
+      <div>
+        <label>시/도</label>
+        <select id="sido"></select>
+      </div>
+      <div>
+        <label>시/군/구 (선택)</label>
+        <select id="sigungu"><option value="">전체</option></select>
+      </div>
+      <div>
+        <label>시작(년월)</label>
+        <input id="start" type="month">
+      </div>
+      <div>
+        <label>종료(년월)</label>
+        <input id="end" type="month">
+      </div>
+      <div>
+        <button id="searchBtn" onclick="doSearch()">검색</button>
+      </div>
+    </div>
+    <div class="hint">💡 시/군/구를 <b>전체</b>로 두면 해당 시/도의 모든 구·군을 훑습니다(조금 느려요). 빠른 조회는 시/군/구를 지정하세요.</div>
+  </div>
+
+  <div class="bar">
+    <div class="status" id="status">단지명·지역·기간을 입력하고 검색을 눌러보세요.</div>
+    <button class="btn-excel" id="excelBtn" onclick="downloadExcel()" disabled>⬇ 엑셀 다운로드</button>
+  </div>
+
+  <div class="tblwrap">
+    <table>
+      <thead>
+        <tr>
+          <th class="l">단지명</th><th class="l">법정동</th><th class="l">지번</th>
+          <th>거래일</th><th>거래금액(만원)</th><th>전용면적(㎡)</th>
+          <th>층</th><th>건축년도</th><th class="l">거래유형</th><th class="l">해제</th>
+        </tr>
+      </thead>
+      <tbody id="tbody">
+        <tr><td colspan="10" class="empty">아직 검색 결과가 없습니다.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+let ROWS = [];
+
+async function loadRegions(){
+  const res = await fetch('/api/regions');
+  const data = await res.json();
+  const sido = document.getElementById('sido');
+  Object.keys(data).forEach(s=>{
+    const o=document.createElement('option');o.value=s;o.textContent=s;sido.appendChild(o);
+  });
+  window.__REGIONS = data;
+  sido.value = '서울특별시';
+  onSidoChange();
+}
+function onSidoChange(){
+  const s = document.getElementById('sido').value;
+  const sg = document.getElementById('sigungu');
+  sg.innerHTML = '<option value="">전체</option>';
+  (window.__REGIONS[s]||[]).forEach(g=>{
+    const o=document.createElement('option');o.value=g;o.textContent=g;sg.appendChild(o);
+  });
+}
+
+function setDefaultDates(){
+  const now=new Date();
+  const end=now.toISOString().slice(0,7);
+  const s=new Date(now.getFullYear(),now.getMonth()-5,1);
+  const start=s.toISOString().slice(0,7);
+  document.getElementById('start').value=start;
+  document.getElementById('end').value=end;
+}
+
+function fmt(n){return n==null?'':n.toLocaleString('ko-KR');}
+function eok(manwon){
+  if(manwon==null) return '';
+  const eok=Math.floor(manwon/10000), rest=manwon%10000;
+  return (eok?eok+'억 ':'')+(rest?fmt(rest):'')+(eok&&!rest?'':'');
+}
+
+async function doSearch(){
+  const complex=document.getElementById('complex').value.trim();
+  const sido=document.getElementById('sido').value;
+  const sigungu=document.getElementById('sigungu').value;
+  const start=document.getElementById('start').value.replace('-','');
+  const end=document.getElementById('end').value.replace('-','');
+  if(!complex){alert('단지명을 입력하세요.');return;}
+  if(!start||!end){alert('기간을 지정하세요.');return;}
+
+  const btn=document.getElementById('searchBtn');
+  btn.disabled=true;
+  document.getElementById('excelBtn').disabled=true;
+  document.getElementById('status').innerHTML='<span class="spin"></span>조회 중… (지역 전체 검색은 수 초 걸릴 수 있어요)';
+  document.getElementById('tbody').innerHTML='<tr><td colspan="10" class="empty">조회 중…</td></tr>';
+
+  try{
+    const res=await fetch('/api/search',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({complex,sido,sigungu,start_ym:start,end_ym:end})});
+    const data=await res.json();
+    if(!res.ok){throw new Error(data.error||'조회 실패');}
+    ROWS=data.rows;
+    render(data);
+  }catch(e){
+    document.getElementById('status').textContent='오류: '+e.message;
+    document.getElementById('tbody').innerHTML='<tr><td colspan="10" class="empty">'+e.message+'</td></tr>';
+  }finally{
+    btn.disabled=false;
+  }
+}
+
+function render(data){
+  const tb=document.getElementById('tbody');
+  const q=data.queried;
+  document.getElementById('status').textContent=
+    `총 ${data.count.toLocaleString()}건 · ${q.sido} ${q.sigungu} · ${q.months}개월 · 지역 ${q.codes}곳 조회`;
+  if(!ROWS.length){
+    tb.innerHTML='<tr><td colspan="10" class="empty">일치하는 거래가 없습니다. 단지명·기간·지역을 확인하세요.</td></tr>';
+    document.getElementById('excelBtn').disabled=true;
+    return;
+  }
+  tb.innerHTML=ROWS.map(r=>`<tr>
+    <td class="l">${r.aptNm}</td><td class="l">${r.umdNm}</td><td class="l">${r.jibun}</td>
+    <td>${r.dealDate}</td><td title="${eok(r.amount)}">${fmt(r.amount)}</td>
+    <td>${r.area}</td><td>${r.floor}</td><td>${r.buildYear}</td>
+    <td class="l">${r.dealType||''}</td>
+    <td class="l ${r.cancel?'cancel':''}">${r.cancel?('해제 '+(r.cancelDay||'')):''}</td>
+  </tr>`).join('');
+  document.getElementById('excelBtn').disabled=false;
+}
+
+function downloadExcel(){
+  if(!ROWS.length){alert('내려받을 데이터가 없습니다.');return;}
+  const complex=document.getElementById('complex').value.trim();
+  const header=['단지명','법정동','지번','거래일','거래금액(만원)','거래금액(억)','전용면적(㎡)','층','건축년도','거래유형','해제여부','해제사유발생일'];
+  const aoa=[header];
+  ROWS.forEach(r=>aoa.push([
+    r.aptNm,r.umdNm,r.jibun,r.dealDate,r.amount,eok(r.amount).trim(),
+    r.area?Number(r.area):'',r.floor?Number(r.floor):'',r.buildYear,
+    r.dealType||'',r.cancel||'',r.cancelDay||''
+  ]));
+  const ws=XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols']=[{wch:18},{wch:12},{wch:10},{wch:12},{wch:14},{wch:12},{wch:12},{wch:6},{wch:9},{wch:9},{wch:9},{wch:14}];
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,ws,'실거래가');
+  const today=new Date().toISOString().slice(0,10);
+  XLSX.writeFile(wb,`실거래가_${complex||'조회'}_${today}.xlsx`);
+}
+
+document.getElementById('sido').addEventListener('change',onSidoChange);
+document.getElementById('complex').addEventListener('keydown',e=>{if(e.key==='Enter')doSearch();});
+loadRegions();
+setDefaultDates();
+</script>
+</body>
+</html>

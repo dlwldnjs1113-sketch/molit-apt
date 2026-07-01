@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: molit-apt
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --timeout 120 --workers 2
+    envVars:
+      - key: MOLIT_API_KEY
+        sync: false
