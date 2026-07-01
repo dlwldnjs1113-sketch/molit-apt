@@ -47,7 +47,8 @@
     <div class="grid">
       <div>
         <label>단지명</label>
-        <input id="complex" placeholder="예: 래미안, 자이, 헬리오시티" autocomplete="off">
+        <input id="complex" placeholder="예: 래미안, 자이, 헬리오시티" autocomplete="off" list="complexList">
+        <datalist id="complexList"></datalist>
       </div>
       <div>
         <label>시/도</label>
@@ -69,7 +70,8 @@
         <button id="searchBtn" onclick="doSearch()">검색</button>
       </div>
     </div>
-    <div class="hint">💡 시/군/구를 <b>전체</b>로 두면 해당 시/도의 모든 구·군을 훑습니다(조금 느려요). 빠른 조회는 시/군/구를 지정하세요.</div>
+    <div class="hint">💡 <b>시/군/구 + 기간</b>을 고르면, 단지명 칸을 클릭했을 때 그 지역 실제 단지 목록이 드롭다운으로 뜹니다(글자를 치면 좁혀져요). 시/군/구를 <b>전체</b>로 두면 시/도 전체를 훑어요(조금 느림).</div>
+    <div class="hint" id="acStatus" style="display:none;"></div>
   </div>
 
   <div class="bar">
@@ -114,6 +116,37 @@ function onSidoChange(){
   (window.__REGIONS[s]||[]).forEach(g=>{
     const o=document.createElement('option');o.value=g;o.textContent=g;sg.appendChild(o);
   });
+}
+
+let acKey='';   // 마지막으로 불러온 지역·기간 조합 (중복 호출 방지)
+async function loadComplexes(){
+  const sido=document.getElementById('sido').value;
+  const sigungu=document.getElementById('sigungu').value;
+  const start=document.getElementById('start').value.replace('-','');
+  const end=document.getElementById('end').value.replace('-','');
+  const st=document.getElementById('acStatus');
+  const dl=document.getElementById('complexList');
+  if(!sigungu||!start||!end){ dl.innerHTML=''; st.style.display='none'; acKey=''; return; }
+  const key=`${sido}|${sigungu}|${start}|${end}`;
+  if(key===acKey) return;      // 이미 불러온 조합이면 스킵
+  acKey=key;
+  st.style.display='block';
+  st.innerHTML='<span class="spin"></span>이 지역 단지 목록 불러오는 중…';
+  try{
+    const res=await fetch('/api/complexes',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({sido,sigungu,start_ym:start,end_ym:end})});
+    const data=await res.json();
+    if(!res.ok){throw new Error(data.error||'불러오기 실패');}
+    dl.innerHTML=data.names.map(n=>`<option value="${n.replace(/"/g,'&quot;')}">`).join('');
+    if(data.errors&&data.errors.length){
+      st.innerHTML=`⚠️ API 오류: ${data.errors[0]} — 키 승인/종류를 확인하세요.`;
+    }else{
+      st.innerHTML=`✅ 단지 ${data.count}개 로딩됨 · 단지명 칸을 클릭하면 목록이 뜹니다.`;
+    }
+  }catch(e){
+    acKey='';
+    st.innerHTML='단지 목록 불러오기 실패: '+e.message;
+  }
 }
 
 function setDefaultDates(){
@@ -165,10 +198,16 @@ async function doSearch(){
 function render(data){
   const tb=document.getElementById('tbody');
   const q=data.queried;
-  document.getElementById('status').textContent=
-    `총 ${data.count.toLocaleString()}건 · ${q.sido} ${q.sigungu} · ${q.months}개월 · 지역 ${q.codes}곳 조회`;
+  const errNote=(data.errors&&data.errors.length)
+    ? ` ⚠️ API 오류: ${data.errors[0]}` : '';
+  document.getElementById('status').innerHTML=
+    `총 ${data.count.toLocaleString()}건 · ${q.sido} ${q.sigungu} · ${q.months}개월 · 지역 ${q.codes}곳 · 수집 ${(q.fetched||0).toLocaleString()}건`
+    + (errNote?`<span style="color:#dc2626;font-weight:600;">${errNote}</span>`:'');
   if(!ROWS.length){
-    tb.innerHTML='<tr><td colspan="10" class="empty">일치하는 거래가 없습니다. 단지명·기간·지역을 확인하세요.</td></tr>';
+    const msg=(data.errors&&data.errors.length)
+      ? `국토부 API가 오류를 반환했어요: <b>${data.errors[0]}</b><br><span style="font-size:12px">키 승인(활용신청) 여부·키 종류(Decoding)를 확인하세요. 승인 직후엔 1시간쯤 걸릴 수 있어요.</span>`
+      : '일치하는 거래가 없습니다. 단지명·기간·지역을 확인하세요.';
+    tb.innerHTML=`<tr><td colspan="10" class="empty">${msg}</td></tr>`;
     document.getElementById('excelBtn').disabled=true;
     return;
   }
@@ -200,7 +239,10 @@ function downloadExcel(){
   XLSX.writeFile(wb,`실거래가_${complex||'조회'}_${today}.xlsx`);
 }
 
-document.getElementById('sido').addEventListener('change',onSidoChange);
+document.getElementById('sido').addEventListener('change',()=>{onSidoChange();loadComplexes();});
+document.getElementById('sigungu').addEventListener('change',loadComplexes);
+document.getElementById('start').addEventListener('change',loadComplexes);
+document.getElementById('end').addEventListener('change',loadComplexes);
 document.getElementById('complex').addEventListener('keydown',e=>{if(e.key==='Enter')doSearch();});
 loadRegions();
 setDefaultDates();
